@@ -76,21 +76,22 @@ compose_project() {
 }
 
 # 验证容器属于当前 compose project（防止误操作非本 project 的容器）
+# 注：仅检查 project 标签。容器名与 compose service 名可能不一致
+# （如容器名 sub2api-postgres 对应 service 名 postgres），故不比较 service 标签。
 verify_compose_container() {
-  service="$1"
+  container="$1"
   project="$2"
 
   # 容器不存在则跳过
-  if ! docker inspect "$service" >/dev/null 2>&1; then
+  if ! docker inspect "$container" >/dev/null 2>&1; then
     return 0
   fi
 
-  container_project="$(docker inspect "$service" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
-  container_service="$(docker inspect "$service" --format '{{index .Config.Labels "com.docker.compose.service"}}')"
+  container_project="$(docker inspect "$container" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
 
-  if [ "$container_project" != "$project" ] || [ "$container_service" != "$service" ]; then
-    echo "✗ 容器 $service 存在但不属于 compose project $project" >&2
-    echo "  修复方法: cd $STACK_DIR && docker stop $service && docker rm $service && docker compose up -d $service" >&2
+  if [ "$container_project" != "$project" ]; then
+    echo "✗ 容器 $container 存在但不属于 compose project $project" >&2
+    echo "  修复方法: cd $STACK_DIR && docker stop $container && docker rm $container && docker compose up -d" >&2
     exit 1
   fi
 }
