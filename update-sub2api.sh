@@ -17,12 +17,14 @@ HEALTH_INTERVAL=5
 CHECK_ONLY=0
 VERIFY_ONLY=0
 BACKUP_ONLY=0
+CLEANUP_ONLY=0
 ROLLBACK=0
 
 case "${1:-}" in
   --check-only) CHECK_ONLY=1 ;;
   --verify)     VERIFY_ONLY=1 ;;
   --backup-only) BACKUP_ONLY=1 ;;
+  --cleanup-only) CLEANUP_ONLY=1 ;;
   --rollback)   ROLLBACK=1 ;;
   --help|-h)
     echo "sub2api Docker 服务自动更新脚本"
@@ -33,6 +35,7 @@ case "${1:-}" in
     echo "  --check-only    仅检查版本，不更新"
     echo "  --verify        仅验证服务状态"
     echo "  --backup-only   仅备份数据库和 compose 文件"
+    echo "  --cleanup-only  仅清理旧镜像和悬空镜像"
     echo "  --rollback      回滚到最近一次备份"
     echo "  --help, -h      显示此帮助信息"
     exit 0
@@ -59,6 +62,38 @@ require_cmd sed
 require_cmd grep
 require_cmd awk
 require_cmd date
+
+# ── Compose project 验证 ──
+
+# 从 docker compose config 提取 project name
+compose_project() {
+  (
+    cd "$STACK_DIR"
+    docker compose config 2>/dev/null \
+      | sed -n 's/^name:[[:space:]]*//p' \
+      | head -n 1
+  )
+}
+
+# 验证容器属于当前 compose project（防止误操作非本 project 的容器）
+verify_compose_container() {
+  service="$1"
+  project="$2"
+
+  # 容器不存在则跳过
+  if ! docker inspect "$service" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  container_project="$(docker inspect "$service" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
+  container_service="$(docker inspect "$service" --format '{{index .Config.Labels "com.docker.compose.service"}}')"
+
+  if [ "$container_project" != "$project" ] || [ "$container_service" != "$service" ]; then
+    echo "✗ 容器 $service 存在但不属于 compose project $project" >&2
+    echo "  修复方法: cd $STACK_DIR && docker stop $service && docker rm $service && docker compose up -d $service" >&2
+    exit 1
+  fi
+}
 
 # ── 版本工具函数 ──
 
@@ -162,6 +197,34 @@ cleanup_dangling_images() {
     docker image prune -f >/dev/null
     echo "✓ 悬空镜像清理完成"
   fi
+}
+
+# 仅清理模式：清理各服务旧镜像 + 悬空镜像
+do_cleanup_only() {
+  echo "── 仅清理模式 ──"
+  echo ""
+
+  # 清理各服务的旧镜像（同一仓库中非当前使用的镜像）
+  for service in sub2api sub2api-postgres sub2api-redis; do
+    current_image_id="$(container_image_id "$service")"
+    current_image="$(docker inspect -f '{{.Config.Image}}' "$service" 2>/dev/null || true)"
+    if [ -z "$current_image" ]; then
+      continue
+    fi
+    # 提取仓库名（不含 tag）
+    repo="${current_image%:*}"
+    # 列出该仓库的所有镜像 ID（去重），清理非当前的
+    docker images -q "$repo" 2>/dev/null | sort -u | while read -r img_id; do
+      if [ -n "$img_id" ] && [ "$img_id" != "$current_image_id" ]; then
+        cleanup_old_image "$service" "$img_id"
+      fi
+    done
+  done
+
+  echo ""
+  cleanup_dangling_images
+  echo ""
+  echo "✓ 清理完成"
 }
 
 # ── 备份相关 ──
@@ -355,7 +418,13 @@ if [ "$BACKUP_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-# 4. 检查 STACK_DIR 和 COMPOSE_FILE 存在
+# 4. 仅清理模式（清理旧镜像 + 悬空镜像，不更新服务）
+if [ "$CLEANUP_ONLY" -eq 1 ]; then
+  do_cleanup_only
+  exit 0
+fi
+
+# 5. 检查 STACK_DIR 和 COMPOSE_FILE 存在
 if [ ! -d "$STACK_DIR" ]; then
   echo "✗ 部署目录不存在: $STACK_DIR" >&2
   exit 1
@@ -366,14 +435,24 @@ if [ ! -f "$COMPOSE_FILE" ]; then
   exit 1
 fi
 
-# 5. 获取当前版本
+# 6. 验证 compose project（防止误操作非本 project 的容器）
+COMPOSE_PROJECT="$(compose_project)"
+if [ -z "$COMPOSE_PROJECT" ]; then
+  echo "✗ 无法从 $STACK_DIR 解析 compose project name" >&2
+  exit 1
+fi
+verify_compose_container "sub2api" "$COMPOSE_PROJECT"
+verify_compose_container "sub2api-postgres" "$COMPOSE_PROJECT"
+verify_compose_container "sub2api-redis" "$COMPOSE_PROJECT"
+
+# 7. 获取当前版本
 SUB2API_LOCAL="$(running_sub2api_version 2>/dev/null || true)"
 if [ -z "$SUB2API_LOCAL" ]; then
   echo "✗ 无法获取 sub2api 当前版本（容器是否存在？）" >&2
   exit 1
 fi
 
-# 6. 获取最新版本
+# 8. 获取最新版本
 SUB2API_LATEST="$(latest_release_tag "$SUB2API_REPO" 2>/dev/null || true)"
 if [ -z "$SUB2API_LATEST" ]; then
   echo "✗ 无法获取 sub2api 最新版本（GitHub API 请求失败？）" >&2
@@ -381,14 +460,14 @@ if [ -z "$SUB2API_LATEST" ]; then
   exit 1
 fi
 
-# 7. 显示版本对比
+# 9. 显示版本对比
 echo "── sub2api 版本检查 ──"
 echo ""
 echo "  当前版本: $SUB2API_LOCAL"
 echo "  最新版本: $SUB2API_LATEST"
 echo ""
 
-# 8. 如果已是最新（版本相等或本地更新）
+# 10. 如果已是最新（版本相等或本地更新）
 if version_eq "$SUB2API_LOCAL" "$SUB2API_LATEST" || version_gt "$SUB2API_LOCAL" "$SUB2API_LATEST"; then
   echo "✓ 已是最新版本"
   echo ""
@@ -403,17 +482,17 @@ if version_eq "$SUB2API_LOCAL" "$SUB2API_LATEST" || version_gt "$SUB2API_LOCAL" 
   exit 0
 fi
 
-# 9. 有新版本
+# 11. 有新版本
 echo "⬆ sub2api: $SUB2API_LOCAL → $SUB2API_LATEST"
 
-# 10. 仅检查模式
+# 12. 仅检查模式
 if [ "$CHECK_ONLY" -eq 1 ]; then
   echo ""
   echo "（--check-only 模式，不执行更新）"
   exit 0
 fi
 
-# 11. 自动执行更新（不询问确认）
+# 13. 自动执行更新（不询问确认）
 echo ""
 echo "── 开始更新 sub2api ──"
 echo ""
@@ -477,6 +556,6 @@ cleanup_dangling_images
 echo ""
 echo "✓ 更新完成"
 
-# 12. 验证
+# 14. 验证
 echo ""
 do_verify
