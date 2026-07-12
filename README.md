@@ -2,33 +2,15 @@
 
 自动检测并更新 Docker Compose 中的 sub2api、PostgreSQL 和 Redis，只在有新版本时才更新，不影响其他服务。
 
-## 我的旁路由一键更新
-
-当前旁路由已固定为 `root@192.168.31.81`，部署目录为 `/mnt/docker-data/sub2api-deploy`。在本仓库根目录执行：
-
-```sh
-sh install.sh
-```
-
-脚本会自动连接旁路由、部署远端更新器、安装 `sub2` 命令到本机，整个过程不再询问地址、用户名、目录或更新确认。
-
-该命令依赖当前电脑已经配置好的 SSH 免密登录。它使用 `BatchMode=yes`，如果密钥认证失效会直接报错，不会停下来等待输入密码。
-
 ## 快速开始
 
-首次安装，在 Mac 上执行：
+在你的电脑上执行一条命令：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Souitou-iop/sub2api-smart-update/main/install.sh -o /tmp/install-sub2api.sh && sh /tmp/install-sub2api.sh
 ```
 
-安装完成后，直接使用：
-
-```sh
-sub2 update
-```
-
-脚本会自动完成：检查版本 → 备份数据库 → 拉取新镜像 → 重建容器 → 健康检查 → 清理旧镜像 → 验证服务。
+脚本会交互式询问 SSH 地址、用户名和部署目录，然后自动完成：部署更新脚本到路由器 + 安装 `sub2` 命令到本机 + 验证安装。
 
 快捷方式：
 - 指定 SSH 目标：`sh /tmp/install-sub2api.sh root@192.168.1.1`
@@ -48,7 +30,7 @@ sub2 update
 
 | 服务 | 镜像 | 用途 |
 | --- | --- | --- |
-| sub2api | `weishaw/sub2api:0.1.151` | API 网关服务 |
+| sub2api | `weishaw/sub2api:<version>` | API 网关服务 |
 | PostgreSQL | `postgres:18-alpine` | 数据库 |
 | Redis | `redis:8-alpine` | 缓存 |
 
@@ -85,7 +67,7 @@ sub2 update --verify
 sub2 update --backup-only
 ```
 
-备份文件保存在路由器的 `/mnt/docker-data/sub2api-deploy/backup/` 目录下：
+备份文件保存在路由器的 `<deploy-dir>/backup/` 目录下：
 - `sub2api-YYYYMMDDHHMMSS.dump`：PostgreSQL 自定义格式备份（可用 `pg_restore` 恢复）
 - `docker-compose.yml.bak-YYYYMMDDHHMMSS`：compose 配置备份
 
@@ -102,7 +84,7 @@ sub2 update --backup-only
 ssh-keygen -t ed25519
 
 # 复制公钥到旁路由
-ssh-copy-id root@192.168.31.81
+ssh-copy-id root@<router-ip>
 ```
 
 如果密钥认证失效，脚本会直接报错并提示执行 `ssh-copy-id`。
@@ -111,7 +93,7 @@ ssh-copy-id root@192.168.31.81
 
 - 旁路由或服务器已安装 Docker
 - Mac 上已配置 SSH 密钥认证到旁路由
-- sub2api 已部署在 `/mnt/docker-data/sub2api-deploy/`（含 `docker-compose.yml`）
+- sub2api 已部署（含 `docker-compose.yml`，三服务：sub2api + PostgreSQL + Redis）
 - 能访问 GitHub（用于检查更新和下载脚本）
 
 ## 安全说明
@@ -136,7 +118,7 @@ ssh-copy-id root@192.168.31.81
 
 ## 自定义配置
 
-如果部署目录不是默认的 `/mnt/docker-data/sub2api-deploy`，或需要连接其他路由器：
+如果部署目录不是默认的，或需要连接其他路由器，通过环境变量覆盖：
 
 ```sh
 SUB2_HOST=192.168.1.100 \
@@ -147,9 +129,9 @@ sub2 update --check-only
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `SUB2_HOST` | `192.168.31.81` | 路由器地址 |
-| `SUB2_USER` | `root` | SSH 用户名 |
-| `SUB2_DIR` | `/mnt/docker-data/sub2api-deploy` | 部署目录 |
+| `SUB2_HOST` | 安装时指定的地址 | 路由器地址 |
+| `SUB2_USER` | 安装时指定的用户 | SSH 用户名 |
+| `SUB2_DIR` | 安装时指定的目录 | 部署目录 |
 | `GITHUB_TOKEN` | 空 | 避免 GitHub API rate limit |
 
 ## 故障排查
@@ -158,18 +140,18 @@ sub2 update --check-only
 
 ```sh
 # 查看路由器上的脚本日志
-ssh root@192.168.31.81 "docker logs --tail 50 sub2api"
-ssh root@192.168.31.81 "docker inspect -f '{{.Config.Image}}' sub2api"
+ssh root@<router-ip> "docker logs --tail 50 sub2api"
+ssh root@<router-ip> "docker inspect -f '{{.Config.Image}}' sub2api"
 ```
 
 健康检查超时（更新后 `/health` 未返回 200）：
 
 ```sh
 # 查看容器日志
-ssh root@192.168.31.81 "docker logs --tail 50 sub2api"
+ssh root@<router-ip> "docker logs --tail 50 sub2api"
 
 # 回滚到上一个版本
-ssh root@192.168.31.81 "cd /mnt/docker-data/sub2api-deploy && \
+ssh root@<router-ip> "cd <deploy-dir> && \
   cp docker-compose.yml.bak-YYYYMMDDHHMMSS docker-compose.yml && \
   docker compose up -d sub2api"
 ```
@@ -177,7 +159,7 @@ ssh root@192.168.31.81 "cd /mnt/docker-data/sub2api-deploy && \
 数据库恢复（从备份恢复）：
 
 ```sh
-ssh root@192.168.31.81 "cd /mnt/docker-data/sub2api-deploy && \
+ssh root@<router-ip> "cd <deploy-dir> && \
   docker compose stop sub2api && \
   docker exec -i sub2api-postgres pg_restore -U sub2api -d sub2api --clean --if-exists < backup/sub2api-YYYYMMDDHHMMSS.dump && \
   docker compose up -d sub2api"
@@ -186,7 +168,7 @@ ssh root@192.168.31.81 "cd /mnt/docker-data/sub2api-deploy && \
 Docker Compose 执行失败：
 
 ```sh
-ssh root@192.168.31.81 "cd /mnt/docker-data/sub2api-deploy && \
+ssh root@<router-ip> "cd <deploy-dir> && \
   docker compose config && \
   docker compose ps"
 ```
@@ -196,8 +178,8 @@ ssh root@192.168.31.81 "cd /mnt/docker-data/sub2api-deploy && \
 **注意**：修改 `.env` 中的 `ADMIN_PASSWORD` 不会同步到数据库（sub2api 只在首次 AUTO_SETUP 时读环境变量）。需要直接在数据库中修改密码 hash：
 
 ```sh
-ssh root@192.168.31.81 "docker exec sub2api-postgres psql -U sub2api -d sub2api -c \
-  \"UPDATE users SET password_hash = crypt('新密码', gen_salt('bf', 10)) WHERE email = 'admin@ebato.win';\""
+ssh root@<router-ip> "docker exec sub2api-postgres psql -U sub2api -d sub2api -c \
+  \"UPDATE users SET password_hash = crypt('新密码', gen_salt('bf', 10)) WHERE email = 'admin@example.com';\""
 ```
 
 ## 许可证

@@ -1,13 +1,8 @@
 #!/bin/sh
 set -eu
 
-# sub2api 一键更新脚本安装器
-# 在 Mac 上执行，部署 update-sub2api.sh 到路由器并安装 sub2 wrapper
-
-# 默认配置
-DEFAULT_HOST="192.168.31.81"
-DEFAULT_USER="root"
-DEFAULT_DIR="/mnt/docker-data/sub2api-deploy"
+# sub2api 一键更新脚本安装器（通用版）
+# 交互式询问 SSH 目标和部署目录，面向任意用户
 
 # GitHub raw URL（用于下载 update-sub2api.sh 到路由器）
 SCRIPT_URL="https://raw.githubusercontent.com/Souitou-iop/sub2api-smart-update/main/update-sub2api.sh"
@@ -21,18 +16,34 @@ show_usage() {
 用法: sh install.sh [user@host] [部署目录]
 
 参数:
-  user@host   SSH 目标（默认 root@192.168.31.81）
+  user@host   SSH 目标（例如 root@192.168.1.1）
   部署目录     路由器上的部署目录（默认 /mnt/docker-data/sub2api-deploy）
 
+不传参数时，脚本会交互式询问。
+
 示例:
-  sh install.sh                                    # 用默认值安装
-  sh install.sh root@192.168.31.81                 # 指定 SSH 目标
-  sh install.sh root@192.168.1.100 /opt/sub2api    # 指定目标和目录
+  sh install.sh                                    # 交互式安装
+  sh install.sh root@192.168.1.1                   # 指定 SSH 目标
+  sh install.sh root@192.168.1.1 /opt/sub2api      # 指定目标和目录
 
 要求:
   - Mac 上已配置 SSH 密钥认证到路由器
-  - 执行 ssh-copy-id root@192.168.31.81 配置免密登录
+  - 执行 ssh-copy-id root@<router-ip> 配置免密登录
 USAGE_EOF
+}
+
+# ── 交互式读取（带默认值）──
+
+prompt() {
+  var="$1"
+  default="${2:-}"
+  printf "%s" "$var"
+  if [ -n "$default" ]; then
+    printf " [%s]" "$default"
+  fi
+  printf ": "
+  read -r value < /dev/tty
+  echo "${value:-$default}"
 }
 
 # ── 参数解析 ──
@@ -43,15 +54,20 @@ case "${1:-}" in
     exit 0
     ;;
   "")
-    REMOTE_USER="$DEFAULT_USER"
-    REMOTE_HOST="$DEFAULT_HOST"
-    STACK_DIR="$DEFAULT_DIR"
+    # 交互式
+    REMOTE_HOST="$(prompt 'SSH 地址（例如 192.168.1.1）' '')"
+    if [ -z "$REMOTE_HOST" ]; then
+      echo "✗ 必须提供 SSH 地址"
+      exit 1
+    fi
+    REMOTE_USER="$(prompt 'SSH 用户名' 'root')"
+    STACK_DIR="$(prompt '部署目录' '/mnt/docker-data/sub2api-deploy')"
     ;;
   *)
     REMOTE_ARG="$1"
     REMOTE_USER="${REMOTE_ARG%@*}"
     REMOTE_HOST="${REMOTE_ARG#*@}"
-    STACK_DIR="${2:-$DEFAULT_DIR}"
+    STACK_DIR="${2:-/mnt/docker-data/sub2api-deploy}"
     ;;
 esac
 
