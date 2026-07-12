@@ -1,0 +1,92 @@
+#!/bin/sh
+set -eu
+
+# sub2 - sub2api 一键更新命令
+# 通过 SSH 远程调用路由器上的 update-sub2api.sh
+
+# 默认配置（可通过环境变量覆盖）
+SUB2_HOST="${SUB2_HOST:-192.168.31.81}"
+SUB2_USER="${SUB2_USER:-root}"
+SUB2_DIR="${SUB2_DIR:-/mnt/docker-data/sub2api-deploy}"
+REMOTE_SCRIPT="$SUB2_DIR/update-sub2api.sh"
+
+# SSH 选项
+SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no"
+
+usage() {
+  cat << EOF
+用法: sub2 <命令> [参数]
+
+命令:
+  update       检查并更新 sub2api + PostgreSQL + Redis
+  install      安装/更新脚本本身到路由器
+
+update 子命令:
+  sub2 update              检查并直接更新（不询问确认）
+  sub2 update --check-only 只检查版本，不更新
+  sub2 update --verify      只验证服务状态
+  sub2 update --backup-only 只备份数据库和配置
+
+环境变量:
+  SUB2_HOST    路由器地址（默认 192.168.31.81）
+  SUB2_USER    SSH 用户名（默认 root）
+  SUB2_DIR     部署目录（默认 /mnt/docker-data/sub2api-deploy）
+  GITHUB_TOKEN GitHub API token（避免 rate limit）
+
+示例:
+  sub2 update
+  sub2 update --check-only
+  SUB2_HOST=192.168.1.100 sub2 update
+EOF
+}
+
+# 测试 SSH 连接
+test_ssh() {
+  ssh $SSH_OPTS "${SUB2_USER}@${SUB2_HOST}" "echo ok" >/dev/null 2>&1
+}
+
+# 远程执行
+remote_exec() {
+  ssh $SSH_OPTS "${SUB2_USER}@${SUB2_HOST}" "$@"
+}
+
+# 主逻辑
+case "${1:-}" in
+  update)
+    shift
+    # 测试 SSH 连接
+    if ! test_ssh; then
+      echo "✗ SSH 连接失败：${SUB2_USER}@${SUB2_HOST}"
+      echo "  请先配置 SSH 密钥认证："
+      echo "  ssh-copy-id ${SUB2_USER}@${SUB2_HOST}"
+      exit 1
+    fi
+    # 检查远程脚本是否存在
+    if ! remote_exec "test -f '$REMOTE_SCRIPT'" >/dev/null 2>&1; then
+      echo "✗ 路由器上未找到更新脚本：$REMOTE_SCRIPT"
+      echo "  请先执行安装：sub2 install"
+      exit 1
+    fi
+    # 远程执行更新脚本，透传所有参数
+    remote_exec "sh '$REMOTE_SCRIPT' $*"
+    ;;
+  install)
+    # 获取 install.sh 路径（与 sub2 同目录）
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    INSTALL_SH="$SCRIPT_DIR/install.sh"
+    if [ ! -f "$INSTALL_SH" ]; then
+      echo "✗ 未找到 install.sh：$INSTALL_SH"
+      exit 1
+    fi
+    sh "$INSTALL_SH" "${SUB2_USER}@${SUB2_HOST}" "$SUB2_DIR"
+    ;;
+  --help|-h|"")
+    usage
+    ;;
+  *)
+    echo "未知命令：$1"
+    echo
+    usage
+    exit 1
+    ;;
+esac
